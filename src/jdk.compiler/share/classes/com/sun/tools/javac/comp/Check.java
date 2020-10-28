@@ -1554,6 +1554,26 @@ public class Check {
         return false;
     }
 
+    /** Is the given type in the range of some of the types in given list?
+     *  This method is similar but not equal to subset(Type t, List<Type> ts).
+     *  eg:
+     *    t: IOException ts: List[E extends Throwable]
+     *    The method subset would return false.
+     *    This method rangeSet would return true.
+     *    Because type variable E which extends Throwable contains IOException.
+     */
+    boolean rangeSet(Type t, List<Type> ts) {
+        for (List<Type> l = ts; l.nonEmpty(); l = l.tail) {
+            if ((l.head.hasTag(WILDCARD) && l.head.isSuperBound() && types.isSubtype(types.wildLowerBound(l.head), t)) ||
+                (l.head.hasTag(WILDCARD) && l.head.isExtendsBound() && types.isSubtype(t, types.wildUpperBound(l.head))) ||
+                (l.head.hasTag(TYPEVAR) && types.isSubtype(t, ((TypeVar)l.head).getUpperBound())) ||
+                types.isSubtype(t, l.head)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** Is given type a subtype or supertype of
      *  some of the types in given list?
      */
@@ -1648,7 +1668,7 @@ public class Check {
     /** Is exc handled by given exception list?
      */
     boolean isHandled(Type exc, List<Type> handled) {
-        return isUnchecked(exc) || subset(exc, handled);
+        return isUnchecked(exc) || rangeSet(exc, handled);
     }
 
     /** Return all exceptions in thrown list that are not in handled list.
