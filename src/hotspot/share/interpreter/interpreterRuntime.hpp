@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1997, 2022, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 1997, 2023, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -158,6 +158,30 @@ class InterpreterRuntime: AllStatic {
   static MethodCounters* build_method_counters(JavaThread* current, Method* m);
 };
 
+// The Implementation of SignatureHandlerLibrary
+//
+// This library manages the signature handlers of the native methods.
+// The signature handler takes the arguments of the interpreted call stack
+// and transfers them to the calling convention of the native C ABI.
+
+class SignatureHandlerEntry: public CHeapObj<mtCode> {
+  friend class SignatureHandlerLibrary;
+
+ private:
+  uint64_t _fingerprint; // the fingerprint of the parameter
+  address  _handler;     // the corresponding handler
+
+  SignatureHandlerEntry(uint64_t fingerprint, address handler) :
+      _fingerprint(fingerprint),
+      _handler(handler)
+  { }
+
+  ~SignatureHandlerEntry() = default;
+
+ public:
+  uint64_t figerprint() const { return _fingerprint; }
+  address handler()     const { return _handler; }
+};
 
 class SignatureHandlerLibrary: public AllStatic {
  public:
@@ -167,14 +191,16 @@ class SignatureHandlerLibrary: public AllStatic {
  private:
   static BufferBlob*              _handler_blob; // the current buffer blob containing the generated handlers
   static address                  _handler;      // next available address within _handler_blob;
-  static GrowableArray<uint64_t>* _fingerprints; // the fingerprint collection
-  static GrowableArray<address>*  _handlers;     // the corresponding handlers
   static address                  _buffer;       // the temporary code buffer
+  static ResourceHashtable<uint64_t, SignatureHandlerEntry*, 149,
+                           AnyObj::C_HEAP, mtCode>* _signature_handler_table; // the signature handler table
 
   static address set_handler_blob();
   static void initialize();
   static address set_handler(CodeBuffer* buffer);
   static void pd_set_handler(address handler);
+  static SignatureHandlerEntry* lookup(uint64_t fingerprint);
+  static SignatureHandlerEntry* new_entry(uint64_t fingerprint, address handler);
 
  public:
   static void add(const methodHandle& method);

@@ -1270,7 +1270,7 @@ address SignatureHandlerLibrary::set_handler_blob() {
 }
 
 void SignatureHandlerLibrary::initialize() {
-  if (_fingerprints != nullptr) {
+  if (_signature_handler_table != nullptr) {
     return;
   }
   if (set_handler_blob() == nullptr) {
@@ -1281,8 +1281,8 @@ void SignatureHandlerLibrary::initialize() {
                                       SignatureHandlerLibrary::buffer_size);
   _buffer = bb->code_begin();
 
-  _fingerprints = new (mtCode) GrowableArray<uint64_t>(32, mtCode);
-  _handlers     = new (mtCode) GrowableArray<address>(32, mtCode);
+  _signature_handler_table = new (mtCode) ResourceHashtable<uint64_t, SignatureHandlerEntry*,
+                                                            149, AnyObj::C_HEAP, mtCode>();
 }
 
 address SignatureHandlerLibrary::set_handler(CodeBuffer* buffer) {
@@ -1301,10 +1301,24 @@ address SignatureHandlerLibrary::set_handler(CodeBuffer* buffer) {
   return handler;
 }
 
+SignatureHandlerEntry* SignatureHandlerLibrary::lookup(uint64_t fingerprint) {
+  SignatureHandlerEntry** handler_entry = nullptr;
+  handler_entry = _signature_handler_table->get(fingerprint);
+  if (handler_entry != nullptr) {
+    return *handler_entry;
+  } else {
+    return nullptr;
+  }
+}
+
+SignatureHandlerEntry* SignatureHandlerLibrary::new_entry(uint64_t fingerprint, address handler) {
+  return new SignatureHandlerEntry(fingerprint, handler);
+}
+
 void SignatureHandlerLibrary::add(const methodHandle& method) {
   if (method->signature_handler() == nullptr) {
     // use slow signature handler if we can't do better
-    int handler_index = -1;
+    SignatureHandlerEntry* handler_entry = nullptr;
     // check if we can use customized (fast) signature handler
     if (UseFastSignatureHandlers && method->size_of_parameters() <= Fingerprinter::fp_max_size_of_parameters) {
       // use customized signature handler
@@ -1315,9 +1329,9 @@ void SignatureHandlerLibrary::add(const methodHandle& method) {
       uint64_t fingerprint = Fingerprinter(method).fingerprint();
       // allow CPU dependent code to optimize the fingerprints for the fast handler
       fingerprint = InterpreterRuntime::normalize_fast_native_fingerprint(fingerprint);
-      handler_index = _fingerprints->find(fingerprint);
+      handler_entry = lookup(fingerprint);
       // create handler if necessary
-      if (handler_index < 0) {
+      if (handler_entry == nullptr) {
         ResourceMark rm;
         ptrdiff_t align_offset = align_up(_buffer, CodeEntryAlignment) - (address)_buffer;
         CodeBuffer buffer((address)(_buffer + align_offset),
@@ -1333,7 +1347,7 @@ void SignatureHandlerLibrary::add(const methodHandle& method) {
             ttyLocker ttyl;
             tty->cr();
             tty->print_cr("argument handler #%d for: %s %s (fingerprint = " UINT64_FORMAT ", %d bytes generated)",
-                          _handlers->length(),
+                          _signature_handler_table->number_of_entries(),
                           (method->is_static() ? "static" : "receiver"),
                           method->name_and_sig_as_C_string(),
                           fingerprint,
@@ -1357,21 +1371,18 @@ void SignatureHandlerLibrary::add(const methodHandle& method) {
             }
 #endif
           }
-          // add handler to library
-          _fingerprints->append(fingerprint);
-          _handlers->append(handler);
-          // set handler index
-          assert(_fingerprints->length() == _handlers->length(), "sanity check");
-          handler_index = _fingerprints->length() - 1;
+          // create handler entry and add it to library
+          handler_entry = new_entry(fingerprint, handler);
+          _signature_handler_table->put(fingerprint, handler_entry);
         }
       }
       // Set handler under SignatureHandlerLibrary_lock
-      if (handler_index < 0) {
+      if (handler_entry == nullptr) {
         // use generic signature handler
         method->set_signature_handler(Interpreter::slow_signature_handler());
       } else {
         // set handler
-        method->set_signature_handler(_handlers->at(handler_index));
+        method->set_signature_handler(handler_entry->handler());
       }
     } else {
       DEBUG_ONLY(JavaThread::current()->check_possible_safepoint());
@@ -1379,53 +1390,33 @@ void SignatureHandlerLibrary::add(const methodHandle& method) {
       method->set_signature_handler(Interpreter::slow_signature_handler());
     }
   }
-#ifdef ASSERT
-  int handler_index = -1;
-  int fingerprint_index = -2;
-  {
-    // '_handlers' and '_fingerprints' are 'GrowableArray's and are NOT synchronized
-    // in any way if accessed from multiple threads. To avoid races with another
-    // thread which may change the arrays in the above, mutex protected block, we
-    // have to protect this read access here with the same mutex as well!
-    MutexLocker mu(SignatureHandlerLibrary_lock);
-    if (_handlers != nullptr) {
-      handler_index = _handlers->find(method->signature_handler());
-      uint64_t fingerprint = Fingerprinter(method).fingerprint();
-      fingerprint = InterpreterRuntime::normalize_fast_native_fingerprint(fingerprint);
-      fingerprint_index = _fingerprints->find(fingerprint);
-    }
-  }
-  assert(method->signature_handler() == Interpreter::slow_signature_handler() ||
-         handler_index == fingerprint_index, "sanity check");
-#endif // ASSERT
 }
 
 void SignatureHandlerLibrary::add(uint64_t fingerprint, address handler) {
-  int handler_index = -1;
+  SignatureHandlerEntry* handler_entry = nullptr;
   // use customized signature handler
   MutexLocker mu(SignatureHandlerLibrary_lock);
   // make sure data structure is initialized
   initialize();
   fingerprint = InterpreterRuntime::normalize_fast_native_fingerprint(fingerprint);
-  handler_index = _fingerprints->find(fingerprint);
+  handler_entry = lookup(fingerprint);
   // create handler if necessary
-  if (handler_index < 0) {
+  if (handler_entry == nullptr) {
     if (PrintSignatureHandlers && (handler != Interpreter::slow_signature_handler())) {
       tty->cr();
       tty->print_cr("argument handler #%d at " PTR_FORMAT " for fingerprint " UINT64_FORMAT,
-                    _handlers->length(),
+                    _signature_handler_table->number_of_entries(),
                     p2i(handler),
                     fingerprint);
     }
-    _fingerprints->append(fingerprint);
-    _handlers->append(handler);
+    _signature_handler_table->put(fingerprint, new_entry(fingerprint, handler));
   } else {
     if (PrintSignatureHandlers) {
       tty->cr();
       tty->print_cr("duplicate argument handler #%d for fingerprint " UINT64_FORMAT "(old: " PTR_FORMAT ", new : " PTR_FORMAT ")",
-                    _handlers->length(),
+                    _signature_handler_table->number_of_entries(),
                     fingerprint,
-                    p2i(_handlers->at(handler_index)),
+                    p2i(handler_entry->handler()),
                     p2i(handler));
     }
   }
@@ -1434,9 +1425,9 @@ void SignatureHandlerLibrary::add(uint64_t fingerprint, address handler) {
 
 BufferBlob*              SignatureHandlerLibrary::_handler_blob = nullptr;
 address                  SignatureHandlerLibrary::_handler      = nullptr;
-GrowableArray<uint64_t>* SignatureHandlerLibrary::_fingerprints = nullptr;
-GrowableArray<address>*  SignatureHandlerLibrary::_handlers     = nullptr;
 address                  SignatureHandlerLibrary::_buffer       = nullptr;
+ResourceHashtable<uint64_t, SignatureHandlerEntry*, 149, AnyObj::C_HEAP, mtCode>*
+    SignatureHandlerLibrary::_signature_handler_table = nullptr;
 
 
 JRT_ENTRY(void, InterpreterRuntime::prepare_native_call(JavaThread* current, Method* method))
