@@ -1813,17 +1813,17 @@ void PSParallelCompact::forward_to_new_addr() {
                                  &start_region, &end_region);
         for (size_t cur_region = start_region; cur_region < end_region; ++cur_region) {
           RegionData* region_ptr = _summary_data.region(cur_region);
-          size_t live_words = region_ptr->partial_obj_size();
 
-          if (live_words == ParallelCompactData::RegionSize) {
+          if (region_ptr->partial_obj_size() == ParallelCompactData::RegionSize) {
             // No obj-start
             continue;
           }
 
+          size_t live_words = 0;
           HeapWord* region_start = _summary_data.region_to_addr(cur_region);
           HeapWord* region_end = region_start + ParallelCompactData::RegionSize;
 
-          HeapWord* cur_addr = region_start + live_words;
+          HeapWord* cur_addr = region_start + region_ptr->partial_obj_size();
 
           HeapWord* destination = region_ptr->destination();
           while (cur_addr < region_end) {
